@@ -287,6 +287,11 @@ function gsmtapv3_parse_metadata(t, buffer, buffer_len)
             offset = offset + 2
             break
         end
+        
+        if (offset + 4) > buffer_len then
+            break
+        end
+        
         local len = buffer(offset + 2, 2):uint()
         local type_string
         local type_info
@@ -301,18 +306,30 @@ function gsmtapv3_parse_metadata(t, buffer, buffer_len)
         t:add(F_gsmtapv3_md_tlv_len, buffer(offset+2, 2)):set_text(string.format("Length: %d", len))
         offset = offset + 4
 
+        if (offset + len) > buffer_len then
+            break
+        end
+
         md_field = proto_fields_metadata[type]
         md_tag = gsmtapv3_metadata_tags[type]
         if md_tag[3] == ftypes.UINT16 then
-            t:add(md_field, buffer(offset, 2))
+            if len >= 2 then
+                t:add(md_field, buffer(offset, 2))
+            end
         elseif md_tag[3] == ftypes.UINT32 then
-            t:add(md_field, buffer(offset, 4))
+            if len >= 4 then
+                t:add(md_field, buffer(offset, 4))
+            end
         elseif md_tag[3] == ftypes.UINT64 then
-            t:add(md_field, buffer(offset, 8))
+            if len >= 8 then
+                t:add(md_field, buffer(offset, 8))
+            end
         elseif md_tag[3] == ftypes.STRING then
             t:add(md_field, buffer(offset, len):string(ENC_UTF_8))
         elseif md_tag[3] == ftypes.FLOAT then
-            t:add(md_field, buffer(offset, 4))
+            if len >= 4 then
+                t:add(md_field, buffer(offset, 4))
+            end
         else
             if type == 0x0000 then
                 -- "Packet timestamp"
@@ -333,6 +350,11 @@ function gsmtapv3_parse_metadata(t, buffer, buffer_len)
 end
 
 function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
+    -- Check minimum buffer size
+    if tvbuffer:len() < 8 then
+        return
+    end
+
     -- GSMTAPv3
     local version = tvbuffer(0, 1):uint()
     if version == 3 then
@@ -341,6 +363,7 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
         local subtype = tvbuffer(6, 2):uint()
 
         local gsmtap_data_start_pos = 8
+        local hdr_bytes = hdr_len * 4
 
         local t = treeitem:add(gsmtap_wrapper_proto, tvbuffer())
         local itemtext = "Unknown"
@@ -350,11 +373,19 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
 
         local child, version_value = t:add(F_gsmtapv3_version, tvbuffer(0, 1))
         local child, hdr_len_value = t:add(F_gsmtapv3_header_len, tvbuffer(2, 2))
-                                   :set_text(string.format("Maximum header length: %d bytes", hdr_len * 4))
+                                   :set_text(string.format("Maximum header length: %d bytes", hdr_bytes))
         local child, type_value = t:add(F_gsmtapv3_type, tvbuffer(4, 2))
                                    :set_text(string.format("Type: 0x%04x (%s)", type, itemtext))
 
         pinfo.cols.protocol = "GSMTAPv3"
+        
+        -- Parse metadata if buffer has enough data
+        local metadata_len = 0
+        if tvbuffer:len() >= hdr_bytes and hdr_bytes > 8 then
+            metadata_len = gsmtapv3_parse_metadata(t, tvbuffer(8, hdr_bytes - 8), hdr_bytes - 8)
+        end
+        gsmtap_data_start_pos = gsmtap_data_start_pos + metadata_len
+        
         if type == 0x0400 then
             pinfo.cols.info = ""
             itemtext = "Unknown"
@@ -363,8 +394,9 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
             end
             local child, subtype_value = t:add(F_gsmtapv3_subtype, tvbuffer(6, 2))
                                     :set_text(string.format("Subtype: 0x%04x (%s)", subtype, itemtext))
-            gsmtap_data_start_pos = gsmtap_data_start_pos + gsmtapv3_parse_metadata(t, tvbuffer(8, 4 * hdr_len - 8), 4 * hdr_len - 8)
-            lte_mac_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            if gsmtap_data_start_pos < tvbuffer:len() then
+                lte_mac_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            end
         elseif type == 0x0403 then
             pinfo.cols.info = ""
             itemtext = "Unknown"
@@ -373,8 +405,9 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
             end
             local child, subtype_value = t:add(F_gsmtapv3_subtype, tvbuffer(6, 2))
                                     :set_text(string.format("Subtype: 0x%04x (%s)", subtype, itemtext))
-            gsmtap_data_start_pos = gsmtap_data_start_pos + gsmtapv3_parse_metadata(t, tvbuffer(8, 4 * hdr_len - 8), 4 * hdr_len - 8)
-            gsmtapv3_lte_rrc_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            if gsmtap_data_start_pos < tvbuffer:len() then
+                gsmtapv3_lte_rrc_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            end
         elseif type == 0x0404 then
             pinfo.cols.info = ""
             itemtext = "Unknown"
@@ -383,8 +416,9 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
             end
             local child, subtype_value = t:add(F_gsmtapv3_subtype, tvbuffer(6, 2))
                                     :set_text(string.format("Subtype: 0x%04x (%s)", subtype, itemtext))
-            gsmtap_data_start_pos = gsmtap_data_start_pos + gsmtapv3_parse_metadata(t, tvbuffer(8, 4 * hdr_len - 8), 4 * hdr_len - 8)
-            gsmtapv3_nas_eps_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            if gsmtap_data_start_pos < tvbuffer:len() then
+                gsmtapv3_nas_eps_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            end
         elseif type == 0x0503 then
             pinfo.cols.info = ""
             itemtext = "Unknown"
@@ -393,8 +427,9 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
             end
             local child, subtype_value = t:add(F_gsmtapv3_subtype, tvbuffer(6, 2))
                                     :set_text(string.format("Subtype: 0x%04x (%s)", subtype, itemtext))
-            gsmtap_data_start_pos = gsmtap_data_start_pos + gsmtapv3_parse_metadata(t, tvbuffer(8, 4 * hdr_len - 8), 4 * hdr_len - 8)
-            gsmtapv3_nr_rrc_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            if gsmtap_data_start_pos < tvbuffer:len() then
+                gsmtapv3_nr_rrc_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            end
         elseif type == 0x0504 then
             pinfo.cols.info = ""
             itemtext = "Unknown"
@@ -403,8 +438,9 @@ function gsmtap_wrapper_proto.dissector(tvbuffer, pinfo, treeitem)
             end
             local child, subtype_value = t:add(F_gsmtapv3_subtype, tvbuffer(6, 2))
                                     :set_text(string.format("Subtype: 0x%04x (%s)", subtype, itemtext))
-            gsmtap_data_start_pos = gsmtap_data_start_pos + gsmtapv3_parse_metadata(t, tvbuffer(8, 4 * hdr_len - 8), 4 * hdr_len - 8)
-            gsmtapv3_nas_5gs_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            if gsmtap_data_start_pos < tvbuffer:len() then
+                gsmtapv3_nas_5gs_subtypes[subtype][1]:call(tvbuffer:range(gsmtap_data_start_pos):tvb(), pinfo, treeitem)
+            end
         else
             pinfo.cols.info = "GSMTAPv3"
         end
